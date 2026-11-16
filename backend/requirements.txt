@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+sqlalchemy>=2.0
+pymysql
+cryptography
+openai>=1.100.0
+python-multipart
+python-dotenv

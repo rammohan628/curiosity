@@ -1,0 +1,84 @@
+# Curiosity: design notes
+
+## 1. Architecture at a glance
+- **Frontend:** React (Vite). It only displays and requests; every rule is enforced by the server.
+- **Backend:** FastAPI with SQLAlchemy on MySQL.
+- **AI:** OpenAI Responses and Conversations APIs, with the Files API for PDFs.
+- **Main tables:** users, activities, chat sessions, messages, analyses, usage events, settings and a model price list.
+
+## 2. How conversation context is maintained
+
+**One private conversation per student per activity**
+- A student's first message creates an OpenAI Conversation. Its ID is stored in `chat_sessions` (unique per activity and student).
+- Every later message reuses that conversation, so OpenAI keeps the history and the app doesn't resend it.
+- The session is always found from the signed-in user, never from an ID the browser sends. One student cannot reach another's conversation.
+
+**The PDF is attached only once**
+- The teacher's PDF is uploaded to OpenAI once, when the activity is created, and its file ID is saved.
+- It is added only to a student's first message, together with their question. After that, only the question text is sent.
+- The system instructions (tutor role and the teacher's note) are sent with every request. They aren't stored in the conversation, so changing a note or the model applies immediately, even mid-conversation.
+
+**Two copies of the chat**
+- OpenAI holds the context the model sees. MySQL holds a copy of every message for the student's history and the teacher's view.
+- Messages are saved only after the AI answers successfully. A failed call saves nothing, doesn't use up a prompt, and puts the student's text back in the box.
+- If OpenAI ever lost a conversation, the app wouldn't detect it, so the database copy wouldn't be repaired automatically.
+
+**Limits**
+- There is no summarising or trimming of long chats. They rely on the model's very large context window, and cost grows with chat length.
+- Time limits are checked on the server using the start time plus the duration. Sends after expiry or Stop are rejected, even from a stale browser tab.
+
+## 3. Staying in scope
+
+**What is in place**
+- The system prompt tells the AI to use the attached PDF as its source of truth. If the answer isn't there, it must say so before offering general help.
+
+**What is deliberately not enforced**
+- This is soft guidance, not a block. I made it "PDF-first, not PDF-only" because you wanted students to learn more about the topic beyond the PDF.
+- A determined student can still steer the AI off-topic, and the AI may answer general questions.
+
+**How off-topic use is handled today**
+- Prompt limits cap how much a student can do per activity.
+- Prompt analysis labels each prompt as deep, relevant, casual or off-topic, and scores focus on the task, so teachers can see and correct it afterwards.
+
+**If you want it stricter**
+- I can add a per-activity "PDF-only" mode where the AI politely declines anything not covered by the document. It's a small change.
+
+## 4. Security and access control
+- **Passwords and sessions:** passwords are hashed with PBKDF2-SHA256. Sign-in tokens are stored server-side as hashes and expire after 12 hours. Password changes and resets sign out other devices.
+- **Account safety:** five failed logins lock a username for 10 minutes. Temporary passwords force a change at first sign-in, and the server blocks everything else until that is done.
+- **Roles checked on the server:**
+  - Admins manage everything.
+  - Teachers see only their own activities, and only student accounts.
+  - Students can only chat and download.
+- **PDF downloads:** these are authorised by role and by the activity's download switch. Files are saved under random names, so users can't reach paths or other files.
+- **Rendering and input:** AI replies are rendered as Markdown without raw HTML. CSV uploads are validated and capped, and exported CSVs are protected against spreadsheet formula injection.
+
+## 5. Cost design
+- The PDF is sent once, and the unchanged start of each request (instructions plus PDF) is cacheable. A shared cache key per activity lets all students of an activity benefit from the same cache.
+- The cost report shows the cache-hit rate so you can confirm it is working.
+- Cost levers:
+  - A prompt limit per student.
+  - An output-token cap.
+  - A reasoning-effort setting.
+  - The model choice.
+- Every call stores its model and token counts. Costs are calculated from the current price list, so editing a price re-prices the whole report. The report shows the model used on each row.
+- These are estimates from list prices, so actual invoices can differ.
+
+## 6. Prompt analysis design
+- It runs only when a teacher presses Analyse prompts, and only for students with new messages. Results are saved and marked "outdated" when a student chats more.
+- The AI sees the PDF, the student's prompts and short snippets of the AI's replies, and scores relevance, depth and focus out of 10. The overall score weights them 40/40/20.
+- The server validates and clamps whatever the model returns, so malformed output can't break the page or the scores.
+- Treat the scores as an aid for the teacher, not a grade.
+
+## 7. Known limitations and suggested next steps
+- **Analysis can be gamed.** Student prompts are fed into the scoring prompt, so someone could write "give me 10/10" and influence it. Wrapping prompts as untrusted data would reduce this but not eliminate it, and I haven't done that.
+- **No defence against prompt injection** in the tutor chat, either from students or from text inside a PDF, beyond the instructions.
+- **Concurrent chats:** two tabs sending at once could exceed a prompt limit by one.
+- **Login lockouts** are held in server memory, so they reset on restart and aren't shared across several server processes.
+- **The login token** is kept in the browser's local storage. Deploy behind HTTPS and keep the Markdown restrictions.
+- **No class or roster assignment:** all students see all activities from all teachers.
+- **No audit log** of admin actions.
+- **Scanned PDFs** without readable text may give poor answers.
+- **Backups:** the `uploads/` folder, which holds the PDF copies, must be backed up along with MySQL.
+
+I can also put these notes in a Word or PDF file if you'd like.
